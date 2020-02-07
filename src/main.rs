@@ -1,13 +1,13 @@
+use std::borrow::BorrowMut;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
+use std::task::Context;
 
 use hyper::header::HeaderValue;
 use hyper::service::{make_service_fn, service_fn, Service};
 use hyper::{Body, Client, Request, Response};
 use hyper_tls::HttpsConnector;
-use std::borrow::BorrowMut;
-use std::task::Context;
 use tokio::macros::support::Poll;
 
 //#[derive(Clone)]
@@ -137,16 +137,9 @@ async fn main() {
         }
     };
 
-    let basic_auth = match std::env::var_os("BASIC_AUTH") {
-        Some(s) => match s.into_string() {
-            Ok(s) => Some(s),
-            Err(_) => {
-                println!("Invalid BASIC_AUTH variable");
-                None
-            }
-        },
-        None => None,
-    };
+    let basic_auth = get_env_var("BASIC_AUTH");
+
+    let port_var = get_env_var("PROXY_PORT");
 
     match basic_auth {
         Some(_) => {
@@ -168,7 +161,25 @@ async fn main() {
         basic_auth,
     });
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    let addr = SocketAddr::from((
+        [0, 0, 0, 0],
+        match port_var {
+            Some(p) => match p.as_str().parse() {
+                Ok(n) => {
+                    println!("Using port {}", n);
+                    n
+                }
+                Err(_) => {
+                    println!("Invalid port specified: {}", p);
+                    3000
+                }
+            },
+            None => {
+                println!("PROXY_PORT not set, defaulting to 3000");
+                3000
+            }
+        },
+    ));
 
     let make_svc = make_service_fn(move |_conn| {
         let c = server_state.clone();
@@ -187,11 +198,31 @@ async fn main() {
         // Ok::<_, Infallible>(service_fn(Server::hello))
     });
 
-    let hyper_server = hyper::server::Server::bind(&addr).serve(make_svc);
+    let hyper_server = match hyper::server::Server::try_bind(&addr) {
+        Ok(r) => r,
+        Err(e) => {
+            println!("Could not listen: {}", e);
+            return;
+        }
+    }
+    .serve(make_svc);
 
     println!("Proxy is running");
 
     if let Err(e) = hyper_server.await {
         eprintln!("server error: {}", e);
     }
+}
+
+fn get_env_var(key: &str) -> Option<String> {
+    return match std::env::var_os(key) {
+        Some(s) => match s.into_string() {
+            Ok(s) => Some(s),
+            Err(_) => {
+                println!("Invalid {} variable", key);
+                None
+            }
+        },
+        None => None,
+    };
 }
