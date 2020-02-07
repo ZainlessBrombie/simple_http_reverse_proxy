@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "http_auth_proxy"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64",
  "hyper",
