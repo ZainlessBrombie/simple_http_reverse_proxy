@@ -1,14 +1,23 @@
 use std::borrow::BorrowMut;
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, RwLock};
 use std::task::Context;
 
 use hyper::header::HeaderValue;
+use hyper::server::conn::{AddrIncoming, Http};
+use hyper::server::Builder;
 use hyper::service::{make_service_fn, service_fn, Service};
 use hyper::{Body, Client, Request, Response};
+use hyper_tls::native_tls::{TlsAcceptor, TlsAcceptorBuilder};
 use hyper_tls::HttpsConnector;
+use openssl::error::ErrorStack;
+use openssl::ssl::{SslAcceptor, SslAcceptorBuilder, SslMethod};
 use tokio::macros::support::Poll;
+use tokio_proto::TcpServer;
+use tokio_tls::TlsStream;
+
+mod tls_redirector;
 
 //#[derive(Clone)]
 struct Server {
@@ -127,6 +136,17 @@ impl Server {
     }
 }
 
+fn ssl_acceptor(pk_file: &str, chain_file: &str) -> Result<SslAcceptor, ErrorStack> {
+    let mut ssl = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
+    ssl.set_private_key_file(pk_file, openssl::ssl::SslFiletype::PEM)?;
+    ssl.set_certificate_chain_file(chain_file)?;
+    ssl.check_private_key()?;
+    ssl.set_verify_callback(openssl::ssl::SslVerifyMode::NONE, |_, _| {
+        return true;
+    });
+    return Ok(ssl.build());
+}
+
 #[tokio::main]
 async fn main() {
     let target = match std::env::var_os("PROXY_TARGET") {
@@ -140,6 +160,35 @@ async fn main() {
     let basic_auth = get_env_var("BASIC_AUTH");
 
     let port_var = get_env_var("PROXY_PORT");
+
+    let private_key_location = get_env_var("SSL_PRIVATE_FILE");
+    let cert_location = get_env_var("SSL_SERVER_CERT");
+
+    let ssl_a;
+    if private_key_location != None || cert_location != None {
+        if private_key_location == None || cert_location == None {
+            println!("Either both of SSL_PRIVATE_FILE and SSL_SERVER_CERT need to be specified or neither.");
+            return;
+        }
+        let ssl_result = ssl_acceptor(
+            private_key_location.expect("pk var not found").as_str(),
+            cert_location.expect("Cert var not found").as_str(),
+        );
+        ssl_a = match ssl_result {
+            Ok(acceptor) => Some(acceptor),
+            Err(ssl_err) => {
+                println!("openssl reported the following errors:");
+                for err in ssl_err.errors() {
+                    println!("{}", err);
+                }
+                println!("exiting.");
+                return;
+            }
+        };
+    } else {
+        ssl_a = None;
+        println!("Not using https. Set SSL_PRIVATE_FILE and SSL_SERVER_CERT to use https.");
+    }
 
     match basic_auth {
         Some(_) => {
@@ -198,19 +247,40 @@ async fn main() {
         // Ok::<_, Infallible>(service_fn(Server::hello))
     });
 
-    let hyper_server = match hyper::server::Server::try_bind(&addr) {
-        Ok(r) => r,
-        Err(e) => {
-            println!("Could not listen: {}", e);
-            return;
+    match ssl_a {
+        Some(ssl) => {
+            match tls_redirector::listen_tls(addr, ssl) {
+                Ok(tcp) => {
+                    let hyper_server_builder =
+                        hyper::server::Server::from_tcp(tcp).expect("Could not bind server to tcp");
+                    let hyper_server = hyper_server_builder.serve(make_svc);
+                    println!("Proxy is running in https mode");
+
+                    if let Err(e) = hyper_server.await {
+                        eprintln!("server error: {}", e);
+                    }
+                }
+                Err(e) => {
+                    println!("Could not listen: {}", e);
+                    return;
+                }
+            };
         }
-    }
-    .serve(make_svc);
+        None => {
+            let hyper_server = match hyper::server::Server::try_bind(&addr) {
+                Ok(r) => r,
+                Err(e) => {
+                    println!("Could not listen: {}", e);
+                    return;
+                }
+            }
+            .serve(make_svc);
+            println!("Proxy is running");
 
-    println!("Proxy is running");
-
-    if let Err(e) = hyper_server.await {
-        eprintln!("server error: {}", e);
+            if let Err(e) = hyper_server.await {
+                eprintln!("server error: {}", e);
+            }
+        }
     }
 }
 

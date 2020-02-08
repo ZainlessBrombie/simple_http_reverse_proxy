@@ -1,6 +1,6 @@
 [package]
 name = "http_auth_proxy"
-version = "1.0.0"
+version = "1.1.0"
 authors = ["Mathis <mk@thepeaklab.com>"]
 edition = "2018"
 
@@ -8,6 +8,10 @@ edition = "2018"
 
 [dependencies]
 hyper = "0.13"
-tokio = { version = "0.2", features = ["full"] }
+tokio = { version = "0.2", features = ["full", "tcp"] }
 base64 = "0.11.0"
 hyper-tls = "0.4.1"
+openssl = { version = "0.10.28" }
+tokio-tls = { version = "0.3.0" }
+tokio-proto = "0.1.1"
+native-tls = "0.2.3"
